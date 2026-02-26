@@ -1,4 +1,4 @@
-# NAS ZSpace Z4S -- HDD Power Enable for Linux
+# NAS ZSpace Z4S - HDD Power Enable for Linux
 
 ![GitHub](https://img.shields.io/badge/license-MIT-blue.svg) ![GitHub last commit](https://img.shields.io/github/last-commit/hhai93/zspace-z4s)
 
