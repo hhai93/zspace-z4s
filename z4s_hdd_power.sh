@@ -29,11 +29,13 @@ sleep 3 # Wait for the last motor to stabilize
 # Reset all physical bay LEDs (Registers 81-84)
 for i in {81..84}; do write_ec "$i" "00"; done
 
-# Map physical bay LEDs based on hardware path
+# Map physical bay LEDs via kernel sysfs (Xpenology / BusyBox safe)
 # Logic: Port 4->Reg 81, Port 3->Reg 82, Port 2->Reg 83, Port 1->Reg 84
-for disk in /dev/sd[a-z]; do
-    [ -b "$disk" ] || continue
-    PORT=$(udevadm info --query=property --name="$disk" | awk -F'ata-' '/ID_PATH=/{print $2+0; exit}')
+for disk in /sys/block/sd*; do
+    [ -d "$disk" ] || continue
+    
+    # Read absolute hardware path and extract 'ataX' number reliably
+    PORT=$(readlink "$disk" | awk -F'/ata' '{print $2}' | awk -F'/' '{print $1}')
     
     [[ "$PORT" =~ ^[1-4]$ ]] && write_ec $((85 - PORT)) "01"
 done
