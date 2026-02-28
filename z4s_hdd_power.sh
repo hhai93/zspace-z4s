@@ -1,58 +1,39 @@
 #!/bin/bash
 # ==============================================================================
-# Zspace Z4S - Smart SATA Power & LED Control (Ubuntu/Generic Linux)
-# Logic: Sequential power-up (5s delay) + Physical bay LED mapping
+# Zspace Z4S - SATA Power & LED Control (Ubuntu/Generic Linux)
 # ==============================================================================
 
-# 1. Initialize EC Interface
-# Enable write support for the Embedded Controller system
-modprobe ec_sys write_support=1 2>/dev/null
-EC_IO="/sys/kernel/debug/ec/ec0/io"
-
-# Ensure debugfs is mounted to access the EC IO file
-[ ! -d /sys/kernel/debug/ec ] && mount -t debugfs none /sys/kernel/debug 2>/dev/null
-
-write_ec() {
-    # Write raw hex byte to specific EC register offset
-    printf "\\x$2" | dd of=$EC_IO bs=1 seek=$1 conv=notrunc status=none 2>/dev/null
+wait_ec() {
+    # Wait until Input Buffer Full (IBF) bit is cleared (bit 1 = 0)
+    while (( $(dd if=/dev/port bs=1 skip=102 count=1 status=none | od -An -tu1) & 2 )) 2>/dev/null; do :; done
 }
 
-echo "--- Z4S Hardware Initialization Started ---"
+write_ec() {
+    # I/O Sequence: Write Command (0x81) -> Register Address -> Hex Data
+    wait_ec; printf "\x81" | dd of=/dev/port bs=1 seek=102 conv=notrunc status=none
+    wait_ec; printf "\\x$(printf "%02x" "$1")" | dd of=/dev/port bs=1 seek=98 conv=notrunc status=none
+    wait_ec; printf "\x$2" | dd of=/dev/port bs=1 seek=98 conv=notrunc status=none
+}
 
-# 2. Grant Control & Power On System LED
-write_ec 89 "0b" # Register 0x59: Grant EC write access
-write_ec 80 "01" # Register 0x50: System Power LED Solid Blue
+# Grant EC write access & set system LED
+write_ec 89 "0b"
+write_ec 80 "01"
 
-# 3. Staggered Spin-up (Sequentially power-up 4 bays to prevent voltage sag)
-# Register 0x58 (88) controls SATA power bits
-echo "Powering on Bay 1..."
-write_ec 88 "c0"; sleep 5
-
-echo "Powering on Bay 2..."
-write_ec 88 "f0"; sleep 5
-
-echo "Powering on Bay 3..."
-write_ec 88 "fc"; sleep 5
-
-echo "Powering on Bay 4..."
-write_ec 88 "ff"; sleep 8 # Wait for the last motor to stabilize
-
-# 4. Physical Bay LED Mapping via udevadm
-# Resets all LEDs (81-84) before scanning
-write_ec 81 "00"; write_ec 82 "00"; write_ec 83 "00"; write_ec 84 "00"
-
-for disk in /dev/sd[a-z]; do
-    [ ! -b "$disk" ] && continue
-    
-    # Retrieve the physical hardware path (ata-X) to identify the exact bay
-    PORT=$(udevadm info --query=property --name="$disk" | grep "ID_PATH=" | grep -o "ata-[0-9]*" | cut -d'-' -f2)
-    
-    case "$PORT" in
-        4) write_ec 81 "01" ;; # Physical Bay 1 -> Register 0x51
-        3) write_ec 82 "01" ;; # Physical Bay 2 -> Register 0x52
-        2) write_ec 83 "01" ;; # Physical Bay 3 -> Register 0x53
-        1) write_ec 84 "01" ;; # Physical Bay 4 -> Register 0x54
-    esac
+# Staggered spin-up: 5s delay per drive is MANDATORY to prevent peak current overload
+for v in c0 f0 fc ff; do
+    write_ec 88 "$v"
+    sleep 5
 done
+sleep 3 # Wait for the last motor to stabilize
 
-echo "--- Initialization Complete ---"
+# Reset all physical bay LEDs (Registers 81-84)
+for i in {81..84}; do write_ec "$i" "00"; done
+
+# Map physical bay LEDs based on hardware path
+# Logic: Port 4->Reg 81, Port 3->Reg 82, Port 2->Reg 83, Port 1->Reg 84
+for disk in /dev/sd[a-z]; do
+    [ -b "$disk" ] || continue
+    PORT=$(udevadm info --query=property --name="$disk" | awk -F'ata-' '/ID_PATH=/{print $2+0; exit}')
+    
+    [[ "$PORT" =~ ^[1-4]$ ]] && write_ec $((85 - PORT)) "01"
+done
