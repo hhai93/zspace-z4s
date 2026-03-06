@@ -27,7 +27,7 @@ Stock ZSpace firmware controls SATA power and LEDs via proprietary kernel module
 ```
 .
 ├── z4s_daemon          # Main daemon script
-├── z4s-daemon.service  # systemd service unit
+├── z4s_daemon.service  # systemd service unit
 └── README.md
 ```
 
@@ -54,9 +54,9 @@ sudo cp z4s_daemon /usr/local/bin/z4s_daemon
 sudo chmod +x /usr/local/bin/z4s_daemon
 
 # 2. Install service
-sudo cp z4s-daemon.service /etc/systemd/system/
+sudo cp z4s_daemon.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now z4s-daemon.service
+sudo systemctl enable --now z4s_daemon.service
 ```
 
 ---
@@ -88,8 +88,8 @@ z4s_daemon status         # Show all bay status
 ## Troubleshooting
 
 ```bash
-systemctl status z4s-daemon.service
-journalctl -u z4s-daemon.service -f
+systemctl status z4s_daemon.service
+journalctl -u z4s_daemon.service -f
 ```
 
 ---
