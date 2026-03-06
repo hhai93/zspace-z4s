@@ -1,0 +1,212 @@
+#!/bin/bash
+# Zspace Z4S - SATA Power, LED Control & Health Monitor
+#
+# LED values: 00=off  01=green  05=green-blink(IO)
+#             08=red(fault)  09=yellow(degraded)  24=yellow-blink(rebuilding)
+# Bay LED registers: port1=0x54(84) port2=0x53(83) port3=0x52(82) port4=0x51(81)
+
+wait_ec() {
+    while (( $(dd if=/dev/port bs=1 skip=102 count=1 status=none | od -An -tu1) & 2 )) 2>/dev/null; do :; done
+}
+
+write_ec() {
+    wait_ec; printf "\x81" | dd of=/dev/port bs=1 seek=102 conv=notrunc status=none
+    wait_ec; printf "\x$(printf "%02x" "$1")" | dd of=/dev/port bs=1 seek=98 conv=notrunc status=none
+    wait_ec; printf "\x$2" | dd of=/dev/port bs=1 seek=98 conv=notrunc status=none
+}
+
+port_to_led_reg() {
+    echo $(( 85 - $1 ))
+}
+
+get_disk_map() {
+    for disk in /sys/block/sd*; do
+        [ -d "$disk" ] || continue
+        local path dev port
+        path=$(readlink "$disk")
+        [[ "$path" == *usb* ]] && continue
+        dev=$(basename "$disk")
+        port=$(echo "$path" | awk -F'/ata' '{print $2}' | awk -F'/' '{print $1}')
+        [[ "$port" =~ ^[1-4]$ ]] && echo "${dev}:${port}"
+    done
+}
+
+get_io_count() {
+    awk -v d="$1" '$3==d {print $4+$8; exit}' /proc/diskstats 2>/dev/null || echo 0
+}
+
+check_disk_health() {
+    local dev="$1"
+
+    local state_file="/sys/block/${dev}/device/state"
+    if [ -f "$state_file" ]; then
+        local state; state=$(cat "$state_file" 2>/dev/null)
+        [[ "$state" != "running" && -n "$state" ]] && echo "fault" && return
+    fi
+
+    if command -v smartctl &>/dev/null; then
+        timeout 3 smartctl -n standby -H "/dev/${dev}" &>/dev/null
+        # returncode > 2 = serious error (bit 3+ set)
+        (( $? > 2 )) && echo "fault" && return
+    fi
+
+    if command -v zpool &>/dev/null; then
+        local zpool_out; zpool_out=$(timeout 3 zpool status 2>/dev/null)
+        if [ -n "$zpool_out" ]; then
+            local identifiers=("$dev")
+            for dir in /dev/disk/by-id /dev/disk/by-partuuid /dev/disk/by-uuid; do
+                [ -d "$dir" ] || continue
+                while IFS= read -r link; do
+                    target=$(basename "$(readlink "$dir/$link" 2>/dev/null)" 2>/dev/null)
+                    [[ "$target" == ${dev}* ]] && identifiers+=("$link")
+                done < <(ls "$dir" 2>/dev/null)
+            done
+            for ident in "${identifiers[@]}"; do
+                local match_line; match_line=$(echo "$zpool_out" | grep -F "$ident")
+                [ -z "$match_line" ] && continue
+                echo "$match_line" | grep -qiE "resilvering"     && echo "rebuilding" && return
+                echo "$match_line" | grep -qiE "FAULTED|UNAVAIL" && echo "fault"      && return
+                echo "$match_line" | grep -qiE "DEGRADED"        && echo "degraded"   && return
+            done
+        fi
+    fi
+
+    if [ -f /proc/mdstat ]; then
+        local mdstat; mdstat=$(cat /proc/mdstat)
+        if echo "$mdstat" | grep -q "$dev"; then
+            echo "$mdstat" | grep -qE "recovery|resync" && echo "rebuilding" && return
+            echo "$mdstat" | grep -qE "\[.*_.*\]"       && echo "degraded"   && return
+        fi
+    fi
+
+    echo "normal"
+}
+
+boot_drives() {
+    write_ec 89 "0b"
+    write_ec 80 "01"
+
+    # Staggered spin-up: 5s delay per drive to prevent peak current overload
+    for v in c0 f0 fc ff; do
+        write_ec 88 "$v"
+        sleep 5
+    done
+    sleep 3
+
+    for i in {81..84}; do write_ec "$i" "00"; done
+
+    for disk in /sys/block/sd*; do
+        [ -d "$disk" ] || continue
+        PORT=$(readlink "$disk" | awk -F'/ata' '{print $2}' | awk -F'/' '{print $1}')
+        [[ "$PORT" =~ ^[1-4]$ ]] && write_ec "$(port_to_led_reg "$PORT")" "01"
+    done
+}
+
+run_monitor() {
+    local HEALTH_INTERVAL=60  # seconds between SMART/RAID checks
+    local IO_BLINK_MS=80
+    local last_health_check=0
+    declare -A health_cache io_last led_state
+
+    while true; do
+        local now; now=$(date +%s)
+        local disk_entries
+        mapfile -t disk_entries < <(get_disk_map)
+
+        declare -A present_devs=()
+        for entry in "${disk_entries[@]}"; do
+            present_devs["${entry%%:*}"]=1
+        done
+
+        for dev in "${!health_cache[@]}"; do
+            [[ -z "${present_devs[$dev]}" ]] && unset health_cache["$dev"] io_last["$dev"]
+        done
+
+        local need_health=0
+        for entry in "${disk_entries[@]}"; do
+            [[ -z "${health_cache[${entry%%:*}]}" ]] && need_health=1
+        done
+        (( now - last_health_check >= HEALTH_INTERVAL )) && need_health=1
+
+        if (( need_health )); then
+            for entry in "${disk_entries[@]}"; do
+                local dev="${entry%%:*}"
+                health_cache["$dev"]=$(check_disk_health "$dev")
+            done
+            last_health_check=$now
+        fi
+
+        declare -A io_active_regs=()
+        declare -A occupied_regs=()
+        local all_regs=(81 82 83 84)
+
+        for entry in "${disk_entries[@]}"; do
+            local dev="${entry%%:*}" port="${entry##*:}"
+            local reg; reg=$(port_to_led_reg "$port")
+            local health="${health_cache[$dev]:-normal}"
+            local io_now; io_now=$(get_io_count "$dev")
+            local io_prev="${io_last[$dev]:-$io_now}"
+
+            occupied_regs["$reg"]=1
+            [[ "$health" == "normal" ]] && (( io_now != io_prev )) && io_active_regs["$reg"]=1
+            io_last["$dev"]=$io_now
+
+            local target_hex
+            case "$health" in
+                fault)      target_hex="08" ;;
+                degraded)   target_hex="09" ;;
+                rebuilding) target_hex="24" ;;
+                *)          target_hex="01" ;;
+            esac
+
+            # Only write if state changed to avoid unnecessary EC writes
+            if [[ "${led_state[$reg]}" != "$target_hex" && -z "${io_active_regs[$reg]}" ]]; then
+                write_ec "$reg" "$target_hex"
+                led_state["$reg"]="$target_hex"
+            fi
+        done
+
+        if (( ${#io_active_regs[@]} > 0 )); then
+            for reg in "${!io_active_regs[@]}"; do write_ec "$reg" "00"; done
+            sleep "$(echo "scale=3; $IO_BLINK_MS/1000" | bc)"
+            for reg in "${!io_active_regs[@]}"; do
+                write_ec "$reg" "05"
+                led_state["$reg"]="05"
+            done
+        fi
+
+        for reg in "${all_regs[@]}"; do
+            if [[ -z "${occupied_regs[$reg]}" ]] && [[ "${led_state[$reg]}" != "00" ]]; then
+                write_ec "$reg" "00"
+                led_state["$reg"]="00"
+            fi
+        done
+
+        sleep 0.2
+    done
+}
+
+case "${1:-boot}" in
+    boot)
+        boot_drives
+        ;;
+    monitor)
+        run_monitor
+        ;;
+    boot-monitor)
+        boot_drives
+        sleep 1
+        run_monitor
+        ;;
+    status)
+        for entry in $(get_disk_map); do
+            dev="${entry%%:*}"; port="${entry##*:}"
+            printf "/dev/%-4s  port%s  health=%-10s  io=%s\n" \
+                "$dev" "$port" "$(check_disk_health "$dev")" "$(get_io_count "$dev")"
+        done
+        ;;
+    *)
+        echo "Usage: $0 {boot|monitor|boot-monitor|status}"
+        exit 1
+        ;;
+esac
