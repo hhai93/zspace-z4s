@@ -4,7 +4,7 @@
 # Runs inside Arc Linux (before kexec), so DSM kernel sees drives on first scan.
 #
 # Must be placed at: /usr/local/bin/z4s_ec_init.sh (inside Arc initrd)
-# Called by: /opt/arc/boot.sh (injected by inject.sh)
+# Called by: /opt/arc/boot.sh (injected by inject-into-arc-initrd.sh)
 
 LOGPFX="[z4s-ec]"
 
@@ -69,10 +69,28 @@ done
 sleep 3   # extra settling time before LED init
 log "EC power-on complete."
 
-# Clear all bay LEDs (registers 0x51-0x54) to a known off state.
-# z4s_daemon monitor service will take control of LEDs after DSM boots.
-for reg in 51 52 53 54; do
-    write_ec "$reg" "00"
+# Set bay LEDs based on drive presence.
+# Set bay LEDs based on drive presence.
+# DSM uses "sata1", "sata2"... naming instead of "sda", "sdb".
+# Scan both patterns for compatibility.
+# Port-to-register map: port1=0x54 port2=0x53 port3=0x52 port4=0x51
+port_reg() { printf "%02x" $(( 85 - $1 )); }
+
+# First clear all LEDs
+for p in 1 2 3 4; do
+    write_ec "$(port_reg $p)" "00"
+done
+
+# Light green for each occupied bay
+for disk in /sys/block/sata* /sys/block/sd*; do
+    [ -d "$disk" ] || continue
+    path=$(readlink "$disk" 2>/dev/null) || continue
+    [[ "$path" == *usb* ]] && continue
+    tmp="${path#*/ata}"
+    port="${tmp%%/*}"
+    [[ "$port" =~ ^[1-4]$ ]] || continue
+    write_ec "$(port_reg "$port")" "01"   # 01 = green
+    log "  bay $port: green ($(basename $disk))"
 done
 
 # ── SCSI rescan ───────────────────────────────────────────────────────────
