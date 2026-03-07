@@ -5,7 +5,7 @@ DefaultDependencies=no
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/z4s_daemon boot-monitor
+ExecStart=/etc/z4s_daemon boot-monitor
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
