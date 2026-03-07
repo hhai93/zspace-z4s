@@ -70,7 +70,7 @@ check_disk_health() {
     fi
 
     if (( HAS_SMARTCTL )); then
-        timeout 3 smartctl -n standby -H "/dev/${dev}" &>/dev/null
+        timeout 3 smartctl -d sat -n standby -H "/dev/${dev}" &>/dev/null
         (( $? > 2 )) && echo "fault" && return
     fi
 
