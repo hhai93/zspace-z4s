@@ -60,7 +60,7 @@ sudo bash inject.sh /dev/sdX
 SSH into DSM after installation, then install the daemon in monitor-only mode (drives are already powered by Arc):
 
 ```bash
-sudo cp z4s_daemon /usr/local/bin/z4s_daemon
+sudo cp z4s_daemon /usr/local/bin
 sudo chmod +x /usr/local/bin/z4s_daemon
 
 sudo tee /usr/local/etc/rc.d/z4s_daemon.sh << 'RCDEOF'
